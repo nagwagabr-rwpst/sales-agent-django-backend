@@ -1,5 +1,7 @@
 from rest_framework import serializers
 
+from .models import OfflineSalesOrder
+
 
 class OrderItemSerializer(serializers.Serializer):
     product_id = serializers.IntegerField()
@@ -25,3 +27,29 @@ class CreateOrderSerializer(serializers.Serializer):
         if not value:
             raise serializers.ValidationError("Items list cannot be empty.")
         return value
+
+
+class OfflineSalesOrderListSerializer(serializers.ModelSerializer):
+    tenant_name = serializers.CharField(source="tenant.name", read_only=True)
+    sales_agent_name = serializers.CharField(
+        source="sales_agent.user.username",
+        read_only=True,
+    )
+
+    class Meta:
+        model = OfflineSalesOrder
+        fields = [
+            "id",
+            "uuid",
+            "tenant",
+            "tenant_name",
+            "sales_agent",
+            "sales_agent_name",
+            "customer_id",
+            "status",
+            "odoo_order_id",
+            "odoo_order_name",
+            "error_message",
+            "created_at",
+            "synced_at",
+        ]
