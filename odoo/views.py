@@ -1,29 +1,82 @@
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, permission_classes
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
 
-from accounts.services import get_user_tenant
-from .models import OfflineSalesOrder
+from accounts.services import resolve_sales_agent_context
+from .models import OfflineSalesOrder, OdooConnection
 from .services import OdooService
 from .serializers import CreateOrderSerializer, OfflineSalesOrderListSerializer
 
 
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def get_products_view(request):
-    tenant = get_user_tenant(request.user)
-
-    if not tenant:
-        return Response({"error": "No tenant found"}, status=400)
-
-    service = OdooService(tenant)
+    ctx = resolve_sales_agent_context(request.user)
+    service = OdooService(ctx.tenant)
     products = service.get_products()
 
     return Response({"products": products})
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_customers_view(request):
+    ctx = resolve_sales_agent_context(request.user)
+
+    search = request.query_params.get("search")
+    if search is not None:
+        search = search.strip() or None
+
+    page_raw = request.query_params.get("page", "1")
+    page_size_raw = request.query_params.get("page_size", "10")
+
+    try:
+        page = int(page_raw)
+    except (TypeError, ValueError):
+        return Response({"detail": "Invalid page."}, status=status.HTTP_400_BAD_REQUEST)
+    if page < 1:
+        return Response({"detail": "Invalid page."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        page_size = int(page_size_raw)
+    except (TypeError, ValueError):
+        return Response({"detail": "Invalid page_size."}, status=status.HTTP_400_BAD_REQUEST)
+    if page_size < 1 or page_size > 100:
+        return Response({"detail": "Invalid page_size."}, status=status.HTTP_400_BAD_REQUEST)
+
+    offset = (page - 1) * page_size
+    limit = page_size
+
+    try:
+        service = OdooService(ctx.tenant)
+    except OdooConnection.DoesNotExist:
+        return Response(
+            {"detail": "Odoo connection not configured for this tenant."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    try:
+        data = service.get_customers(search=search, limit=limit, offset=offset)
+    except Exception:
+        return Response(
+            {"detail": "Unable to fetch customers from Odoo."},
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+
+    return Response(
+        {
+            "count": data["count"],
+            "page": page,
+            "page_size": page_size,
+            "results": data["results"],
+        },
+        status=status.HTTP_200_OK,
+    )
 
 
 class OdooCreateOrderView(APIView):
@@ -33,8 +86,9 @@ class OdooCreateOrderView(APIView):
         serializer = CreateOrderSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        tenant = request.user.salesagent.tenant
-        sales_agent = request.user.salesagent
+        ctx = resolve_sales_agent_context(request.user)
+        tenant = ctx.tenant
+        sales_agent = ctx.sales_agent
 
         customer_id = serializer.validated_data["customer_id"]
         items = serializer.validated_data["items"]
@@ -65,8 +119,9 @@ class SyncOrdersView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, order_uuid):
-        tenant = request.user.salesagent.tenant
-        sales_agent = request.user.salesagent
+        ctx = resolve_sales_agent_context(request.user)
+        tenant = ctx.tenant
+        sales_agent = ctx.sales_agent
         service = OdooService(tenant)
 
         offline_order = get_object_or_404(
@@ -140,7 +195,8 @@ class OfflineSalesOrderListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        tenant = request.user.salesagent.tenant
+        ctx = resolve_sales_agent_context(request.user)
+        tenant = ctx.tenant
 
         queryset = OfflineSalesOrder.objects.filter(
             tenant=tenant
@@ -150,13 +206,7 @@ class OfflineSalesOrderListView(APIView):
         if status_param:
             queryset = queryset.filter(status=status_param)
 
-        sales_agent_id = request.query_params.get("sales_agent_id")
-        if sales_agent_id:
-            queryset = queryset.filter(sales_agent_id=sales_agent_id)
-
-        tenant_id = request.query_params.get("tenant_id")
-        if tenant_id:
-            queryset = queryset.filter(tenant_id=tenant_id)
+        # Phase 1 strict rule: never trust agent_id / tenant_id from client requests.
 
         created_from = request.query_params.get("created_from")
         if created_from:

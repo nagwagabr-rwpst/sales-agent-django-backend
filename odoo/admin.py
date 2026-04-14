@@ -1,16 +1,40 @@
 from django.contrib import admin
-from .models import OdooConnection
 
-
-from django.contrib import admin
 from .models import OdooConnection, OfflineSalesOrder
 
 
 @admin.register(OdooConnection)
 class OdooConnectionAdmin(admin.ModelAdmin):
-    list_display = ("tenant", "base_url", "database", "username", "is_active", "created_at")
-    search_fields = ("tenant__name", "base_url", "database", "username")
-    list_filter = ("is_active",)
+    list_display = (
+        "id",
+        "tenant",
+        "base_url",
+        "database",
+        "username",
+        "is_active",
+        "created_at",
+    )
+    list_filter = ("is_active", "tenant")
+    search_fields = (
+        "tenant__name",
+        "tenant__code",
+        "base_url",
+        "database",
+        "username",
+    )
+    ordering = ("-created_at",)
+    autocomplete_fields = ("tenant",)
+    list_select_related = ("tenant",)
+    readonly_fields = ("created_at",)
+    fields = (
+        "tenant",
+        "base_url",
+        "database",
+        "username",
+        "password",
+        "is_active",
+        "created_at",
+    )
 
 
 @admin.register(OfflineSalesOrder)
@@ -30,6 +54,7 @@ class OfflineSalesOrderAdmin(admin.ModelAdmin):
     search_fields = (
         "uuid",
         "tenant__name",
+        "tenant__code",
         "sales_agent__user__username",
         "odoo_order_name",
     )
@@ -40,6 +65,9 @@ class OfflineSalesOrderAdmin(admin.ModelAdmin):
         "created_at",
         "synced_at",
     )
+    date_hierarchy = "created_at"
+    ordering = ("-created_at",)
+    list_select_related = ("tenant", "sales_agent", "sales_agent__user")
     readonly_fields = (
         "uuid",
         "tenant",

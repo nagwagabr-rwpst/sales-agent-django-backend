@@ -1,0 +1,63 @@
+{% extends "admin/base_site.html" %}
+{% block title %}{{ title }} | {{ site_title|default:_('Django site admin') }}{% endblock %}
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">Home</a>
+  &rsaquo; {{ title }}
+</div>
+{% endblock %}
+{% block content %}
+<h1>{{ title }}</h1>
+<p>Read-only live data from Odoo (<code>product.product</code>). Select a tenant with an active Odoo connection.</p>
+{% if not selected_tenant_id %}
+  <p class="help">Select a tenant and click <strong>Load</strong> to fetch data.</p>
+{% endif %}
+
+<form method="get" style="margin-bottom: 1.5em;">
+  <label for="tenant">Tenant:</label>
+  <select name="tenant" id="tenant" required>
+    <option value="">— choose —</option>
+    {% for t in tenants %}
+      <option value="{{ t.pk }}" {% if selected_tenant_id == t.pk|stringformat:"s" %}selected{% endif %}>{{ t.name }} ({{ t.code }})</option>
+    {% endfor %}
+  </select>
+  <label for="page">Page:</label>
+  <input type="number" name="page" id="page" value="{{ page }}" min="1" style="width: 5em;">
+  <label for="page_size">Page size:</label>
+  <input type="number" name="page_size" id="page_size" value="{{ page_size }}" min="1" max="{{ page_size_max }}" style="width: 5em;">
+  <input type="submit" value="Load">
+</form>
+
+{% if error %}
+  <p class="errornote">{{ error }}</p>
+{% endif %}
+
+{% if tenant and not error and total_count is not None %}
+  <p><strong>Total in Odoo (all products):</strong> {{ total_count }}</p>
+{% endif %}
+
+{% if empty_message and not error %}
+  <p class="help">{{ empty_message }}</p>
+{% endif %}
+
+{% if results is not None and not error %}
+  <table class="listing">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Name</th>
+        <th>List price</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in results %}
+      <tr>
+        <td>{{ row.id }}</td>
+        <td>{{ row.name }}</td>
+        <td>{{ row.list_price }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endif %}
+{% endblock %}
