@@ -26,6 +26,15 @@ def _parse_int(raw, default, *, minimum, maximum=None):
     return v, None
 
 
+def _get_selected_tenant_id(request):
+    """
+    Accept both:
+    - tenant (normal UI selector)
+    - tenant_id (admin convenience links)
+    """
+    return request.GET.get("tenant") or request.GET.get("tenant_id")
+
+
 def odoo_support_products(request):
     """Read-only product list from live Odoo for a selected tenant."""
     tenants = Tenant.objects.order_by("name")
@@ -36,7 +45,7 @@ def odoo_support_products(request):
     page = 1
     page_size = _SUPPORT_PAGE_SIZE_DEFAULT
     tenant = None
-    tenant_id = request.GET.get("tenant")
+    tenant_id = _get_selected_tenant_id(request)
 
     if tenant_id:
         try:
@@ -109,7 +118,7 @@ def odoo_support_customers(request):
     page_size = _SUPPORT_PAGE_SIZE_DEFAULT
     search = (request.GET.get("search") or "").strip() or None
     tenant = None
-    tenant_id = request.GET.get("tenant")
+    tenant_id = _get_selected_tenant_id(request)
 
     if tenant_id:
         try:

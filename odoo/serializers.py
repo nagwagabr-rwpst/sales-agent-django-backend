@@ -29,6 +29,13 @@ class CreateOrderSerializer(serializers.Serializer):
         return value
 
 
+class BulkSyncOrdersSerializer(serializers.Serializer):
+    order_uuids = serializers.ListField(
+        child=serializers.UUIDField(),
+        allow_empty=False,
+    )
+
+
 class OfflineSalesOrderListSerializer(serializers.ModelSerializer):
     tenant_name = serializers.CharField(source="tenant.name", read_only=True)
     sales_agent_name = serializers.CharField(

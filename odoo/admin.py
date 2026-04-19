@@ -1,4 +1,7 @@
 from django.contrib import admin
+from django.urls import reverse
+from django.utils.html import format_html
+from django.utils.http import urlencode
 
 from .models import OdooConnection, OfflineSalesOrder
 
@@ -13,6 +16,8 @@ class OdooConnectionAdmin(admin.ModelAdmin):
         "username",
         "is_active",
         "created_at",
+        "odoo_products_link",
+        "odoo_customers_link",
     )
     list_filter = ("is_active", "tenant")
     search_fields = (
@@ -25,7 +30,6 @@ class OdooConnectionAdmin(admin.ModelAdmin):
     ordering = ("-created_at",)
     autocomplete_fields = ("tenant",)
     list_select_related = ("tenant",)
-    readonly_fields = ("created_at",)
     fields = (
         "tenant",
         "base_url",
@@ -34,7 +38,23 @@ class OdooConnectionAdmin(admin.ModelAdmin):
         "password",
         "is_active",
         "created_at",
+        "odoo_products_link",
+        "odoo_customers_link",
     )
+    readonly_fields = ("created_at", "odoo_products_link", "odoo_customers_link")
+
+    def _support_link(self, obj, url_name, label):
+        url = reverse(url_name)
+        query = urlencode({"tenant_id": obj.tenant_id})
+        return format_html('<a href="{}?{}">{}</a>', url, query, label)
+
+    @admin.display(description="View Odoo Products")
+    def odoo_products_link(self, obj):
+        return self._support_link(obj, "odoo_support_products", "View Odoo Products")
+
+    @admin.display(description="View Odoo Customers")
+    def odoo_customers_link(self, obj):
+        return self._support_link(obj, "odoo_support_customers", "View Odoo Customers")
 
 
 @admin.register(OfflineSalesOrder)
