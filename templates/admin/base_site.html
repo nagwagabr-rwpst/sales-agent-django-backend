@@ -1,0 +1,18 @@
+{% extends "admin/base.html" %}
+
+{% block title %}{% if subtitle %}{{ subtitle }} | {% endif %}{{ title }} | {{ site_title|default:_('Django site admin') }}{% endblock %}
+
+{% block branding %}
+<div id="site-name"><a href="{% url 'admin:index' %}">{{ site_header|default:_('Django administration') }}</a></div>
+{% if user.is_anonymous %}
+  {% include "admin/color_theme_toggle.html" %}
+{% endif %}
+{% endblock %}
+
+{% block nav-global %}
+<div style="padding: 6px 16px; background: #417690; color: #ffc;">
+  <span style="margin-right: 12px; font-weight: bold;">Odoo support</span>
+  <a href="{% url 'odoo_support_products' %}" style="color: #fff; margin-right: 12px;">Products by tenant</a>
+  <a href="{% url 'odoo_support_customers' %}" style="color: #fff;">Customers by tenant</a>
+</div>
+{% endblock %}

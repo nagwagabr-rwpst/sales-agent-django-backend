@@ -1,29 +1,125 @@
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, permission_classes
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
 
-from accounts.services import get_user_tenant
-from .models import OfflineSalesOrder
+from accounts.services import resolve_sales_agent_context
+from .models import OfflineSalesOrder, OdooConnection
 from .services import OdooService
-from .serializers import CreateOrderSerializer, OfflineSalesOrderListSerializer
+from .serializers import (
+    BulkSyncOrdersSerializer,
+    CreateOrderSerializer,
+    OfflineSalesOrderListSerializer,
+)
+
+
+def _sync_offline_order_to_odoo(offline_order, service):
+    if offline_order.status == OfflineSalesOrder.STATUS_SYNCED:
+        return {
+            "status": "skipped",
+            "message": "Order already synced.",
+            "odoo_order_id": offline_order.odoo_order_id,
+            "odoo_order_name": offline_order.odoo_order_name,
+        }
+
+    try:
+        payload = offline_order.payload
+        result = service.create_order(
+            customer_id=payload["customer_id"],
+            items=payload["items"],
+        )
+
+        offline_order.status = OfflineSalesOrder.STATUS_SYNCED
+        offline_order.odoo_order_id = result.get("order_id")
+        offline_order.odoo_order_name = result.get("name")
+        offline_order.error_message = None
+        offline_order.synced_at = timezone.now()
+        offline_order.save()
+
+        return {
+            "status": "success",
+            "message": "Order synced successfully.",
+            "odoo_order_id": offline_order.odoo_order_id,
+            "odoo_order_name": offline_order.odoo_order_name,
+        }
+    except Exception:
+        offline_order.status = OfflineSalesOrder.STATUS_FAILED
+        offline_order.error_message = "Unable to sync order."
+        offline_order.save()
+        return {
+            "status": "failed",
+            "message": "Unable to sync order.",
+        }
 
 
 @api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def get_products_view(request):
-    tenant = get_user_tenant(request.user)
-
-    if not tenant:
-        return Response({"error": "No tenant found"}, status=400)
-
-    service = OdooService(tenant)
+    ctx = resolve_sales_agent_context(request.user)
+    service = OdooService(ctx.tenant)
     products = service.get_products()
 
     return Response({"products": products})
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_customers_view(request):
+    ctx = resolve_sales_agent_context(request.user)
+
+    search = request.query_params.get("search")
+    if search is not None:
+        search = search.strip() or None
+
+    page_raw = request.query_params.get("page", "1")
+    page_size_raw = request.query_params.get("page_size", "10")
+
+    try:
+        page = int(page_raw)
+    except (TypeError, ValueError):
+        return Response({"detail": "Invalid page."}, status=status.HTTP_400_BAD_REQUEST)
+    if page < 1:
+        return Response({"detail": "Invalid page."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        page_size = int(page_size_raw)
+    except (TypeError, ValueError):
+        return Response({"detail": "Invalid page_size."}, status=status.HTTP_400_BAD_REQUEST)
+    if page_size < 1 or page_size > 100:
+        return Response({"detail": "Invalid page_size."}, status=status.HTTP_400_BAD_REQUEST)
+
+    offset = (page - 1) * page_size
+    limit = page_size
+
+    try:
+        service = OdooService(ctx.tenant)
+    except OdooConnection.DoesNotExist:
+        return Response(
+            {"detail": "Odoo connection not configured for this tenant."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    try:
+        data = service.get_customers(search=search, limit=limit, offset=offset)
+    except Exception:
+        return Response(
+            {"detail": "Unable to fetch customers from Odoo."},
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+
+    return Response(
+        {
+            "count": data["count"],
+            "page": page,
+            "page_size": page_size,
+            "results": data["results"],
+        },
+        status=status.HTTP_200_OK,
+    )
 
 
 class OdooCreateOrderView(APIView):
@@ -33,8 +129,9 @@ class OdooCreateOrderView(APIView):
         serializer = CreateOrderSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        tenant = request.user.salesagent.tenant
-        sales_agent = request.user.salesagent
+        ctx = resolve_sales_agent_context(request.user)
+        tenant = ctx.tenant
+        sales_agent = ctx.sales_agent
 
         customer_id = serializer.validated_data["customer_id"]
         items = serializer.validated_data["items"]
@@ -65,8 +162,9 @@ class SyncOrdersView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, order_uuid):
-        tenant = request.user.salesagent.tenant
-        sales_agent = request.user.salesagent
+        ctx = resolve_sales_agent_context(request.user)
+        tenant = ctx.tenant
+        sales_agent = ctx.sales_agent
         service = OdooService(tenant)
 
         offline_order = get_object_or_404(
@@ -76,71 +174,95 @@ class SyncOrdersView(APIView):
             sales_agent=sales_agent,
         )
 
-        if offline_order.status == OfflineSalesOrder.STATUS_SYNCED:
-            return Response(
-                {
-                    "success": True,
-                    "message": "Order already synced.",
-                    "offline_order_id": offline_order.id,
-                    "uuid": str(offline_order.uuid),
-                    "status": offline_order.status,
-                    "odoo_order_id": offline_order.odoo_order_id,
-                    "odoo_order_name": offline_order.odoo_order_name,
-                },
-                status=status.HTTP_200_OK,
-            )
+        sync_result = _sync_offline_order_to_odoo(offline_order, service)
+        is_success = sync_result["status"] in {"success", "skipped"}
+
+        response_data = {
+            "success": is_success,
+            "message": sync_result["message"],
+            "offline_order_id": offline_order.id,
+            "uuid": str(offline_order.uuid),
+            "status": offline_order.status,
+            "odoo_order_id": offline_order.odoo_order_id,
+            "odoo_order_name": offline_order.odoo_order_name,
+        }
+        if sync_result["status"] == "failed":
+            response_data["error"] = sync_result["message"]
+
+        return Response(
+            response_data,
+            status=status.HTTP_200_OK if is_success else status.HTTP_400_BAD_REQUEST,
+        )
+
+
+class BulkSyncOrdersView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = BulkSyncOrdersSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        ctx = resolve_sales_agent_context(request.user)
+        tenant = ctx.tenant
+        sales_agent = ctx.sales_agent
 
         try:
-            payload = offline_order.payload
-
-            result = service.create_order(
-                customer_id=payload["customer_id"],
-                items=payload["items"],
-            )
-
-            offline_order.status = OfflineSalesOrder.STATUS_SYNCED
-            offline_order.odoo_order_id = result.get("order_id")
-            offline_order.odoo_order_name = result.get("name")
-            offline_order.error_message = None
-            offline_order.synced_at = timezone.now()
-            offline_order.save()
-
+            service = OdooService(tenant)
+        except OdooConnection.DoesNotExist:
             return Response(
-                {
-                    "success": True,
-                    "message": "Order synced successfully.",
-                    "offline_order_id": offline_order.id,
-                    "uuid": str(offline_order.uuid),
-                    "status": offline_order.status,
-                    "odoo_order_id": offline_order.odoo_order_id,
-                    "odoo_order_name": offline_order.odoo_order_name,
-                },
-                status=status.HTTP_200_OK,
+                {"detail": "Odoo connection not configured for this tenant."},
+                status=status.HTTP_404_NOT_FOUND,
             )
 
-        except Exception as e:
-            offline_order.status = OfflineSalesOrder.STATUS_FAILED
-            offline_order.error_message = str(e)
-            offline_order.save()
+        order_uuids = serializer.validated_data["order_uuids"]
+        scoped_orders = OfflineSalesOrder.objects.filter(
+            uuid__in=order_uuids,
+            tenant=tenant,
+            sales_agent=sales_agent,
+        )
+        orders_by_uuid = {str(o.uuid): o for o in scoped_orders}
 
-            return Response(
-                {
-                    "success": False,
-                    "message": "Order sync failed.",
-                    "offline_order_id": offline_order.id,
-                    "uuid": str(offline_order.uuid),
-                    "status": offline_order.status,
-                    "error": str(e),
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        results = []
+        for requested_uuid in order_uuids:
+            requested_uuid_str = str(requested_uuid)
+            offline_order = orders_by_uuid.get(requested_uuid_str)
+
+            if offline_order is None:
+                results.append(
+                    {
+                        "order_uuid": requested_uuid_str,
+                        "status": "failed",
+                        "message": "Order not found in your scope.",
+                    }
+                )
+                continue
+
+            sync_result = _sync_offline_order_to_odoo(offline_order, service)
+            item = {
+                "order_uuid": requested_uuid_str,
+                "status": sync_result["status"],
+                "message": sync_result["message"],
+            }
+            if sync_result["status"] == "success":
+                item["odoo_order_id"] = offline_order.odoo_order_id
+            results.append(item)
+
+        return Response(
+            {
+                "total_requested": len(order_uuids),
+                "total_processed": len(results),
+                "results": results,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class OfflineSalesOrderListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        tenant = request.user.salesagent.tenant
+        ctx = resolve_sales_agent_context(request.user)
+        tenant = ctx.tenant
 
         queryset = OfflineSalesOrder.objects.filter(
             tenant=tenant
@@ -150,13 +272,7 @@ class OfflineSalesOrderListView(APIView):
         if status_param:
             queryset = queryset.filter(status=status_param)
 
-        sales_agent_id = request.query_params.get("sales_agent_id")
-        if sales_agent_id:
-            queryset = queryset.filter(sales_agent_id=sales_agent_id)
-
-        tenant_id = request.query_params.get("tenant_id")
-        if tenant_id:
-            queryset = queryset.filter(tenant_id=tenant_id)
+        # Phase 1 strict rule: never trust agent_id / tenant_id from client requests.
 
         created_from = request.query_params.get("created_from")
         if created_from:
